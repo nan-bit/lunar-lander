@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LUNAR LANDER // 1996</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <!-- Retro arcade pixel font -->
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="cabinet">
+    <div id="marquee">LUNAR LANDER</div>
+    
+    <div id="screen-container">
+      <!-- CRT Glass overlay effect -->
+      <div id="crt-overlay" class="scanlines glow"></div>
+      
+      <div id="screen">
+        <!-- Dashboard/HUD -->
+        <div id="hud">
+          <div class="hud-panel left">
+            <div>SCORE: <span id="score-val">0000</span></div>
+            <div>FUEL: <span id="fuel-val">1000</span>L</div>
+          </div>
+          <div class="hud-panel right">
+            <div>H-SPEED: <span id="h-speed-val">0.0</span> m/s</div>
+            <div>V-SPEED: <span id="v-speed-val">0.0</span> m/s</div>
+            <div>ANGLE: <span id="angle-val">0</span>&deg;</div>
+          </div>
+        </div>
+        
+        <!-- Game Canvas -->
+        <canvas id="gameCanvas" width="800" height="500"></canvas>
+        
+        <!-- Overlay Screens -->
+        <div id="overlay-screen" class="active">
+          <div class="screen-content" id="start-screen">
+            <h1>INSERT COIN</h1>
+            <p class="blink">PRESS ENTER TO START</p>
+            <div class="controls-guide">
+              <p>KEYS:</p>
+              <p>▲ / SPACE : THRUST</p>
+              <p>◀ / ▶ : ROTATE</p>
+            </div>
+          </div>
+          
+          <div class="screen-content hidden" id="gameover-screen">
+            <h1 id="gameover-title">CRITICAL FAILURE</h1>
+            <p id="gameover-msg">SHUTTLE DESTROYED</p>
+            <p class="blink">PRESS ENTER TO TRY AGAIN</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <div id="bezel-info">
+      <span>SYSTEM BOOT: OK</span>
+      <span>MODEL: LL-1996</span>
+    </div>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>
