@@ -1,5 +1,6 @@
 {
   "hosting": {
+    "site": "lunar-lander",
     "public": "public",
     "ignore": [
       "firebase.json",
