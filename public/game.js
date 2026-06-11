@@ -9,12 +9,23 @@ const MAX_SAFE_V_SPEED = 1.2;
 const MAX_SAFE_H_SPEED = 0.6;
 const MAX_SAFE_ANGLE = 0.15; // Radians (~8.5 degrees)
 
+// Tether & Physics constants
+const TETHER_LENGTH = 70;
+const SPRING_K = 0.03;      // Spring stiffness
+const CARGO_MASS = 0.5;      // Impact on lander weight (ratio)
+const CARGO_GRAVITY = 0.03;  // Slightly lighter gravity for cargo
+
 // UI elements
 const scoreVal = document.getElementById('score-val');
 const fuelVal = document.getElementById('fuel-val');
 const hSpeedVal = document.getElementById('h-speed-val');
 const vSpeedVal = document.getElementById('v-speed-val');
 const angleVal = document.getElementById('angle-val');
+const cargoVal = document.getElementById('cargo-val');
+const stressVal = document.getElementById('stress-val');
+const windVal = document.getElementById('wind-val');
+const windDirArrow = document.getElementById('wind-dir-arrow');
+const crtOverlay = document.getElementById('crt-overlay');
 
 const overlayScreen = document.getElementById('overlay-screen');
 const startScreen = document.getElementById('start-screen');
@@ -26,6 +37,12 @@ const gameoverMsg = document.getElementById('gameover-msg');
 let gameState = 'START'; // START, PLAYING, GAMEOVER
 let score = 0;
 let fuel = 1000;
+let windX = 0;
+let targetWindX = 0;
+let windTimer = 0;
+let stress = 0;
+let particles = [];
+
 let lander = {
   x: 100,
   y: 50,
@@ -39,6 +56,27 @@ let lander = {
   rotateRight: false
 };
 
+// Cargo State
+let cargo = {
+  x: 650,
+  y: 0, // Will be snapped to terrain height
+  vx: 0,
+  vy: 0,
+  width: 12,
+  height: 12,
+  attached: false,
+  secured: false
+};
+
+// Camera State (viewport)
+let camera = {
+  x: 0,
+  y: 0,
+  zoom: 1,
+  targetZoom: 1
+};
+
+
 // Terrain Definition (Vector points)
 const terrainPoints = [
   { x: 0, y: 450 },
@@ -51,6 +89,16 @@ const terrainPoints = [
   { x: 620, y: 460 },
   { x: 720, y: 300 },
   { x: 800, y: 450 }
+];
+
+// Parallax Background Mountains (Distant, dark outlines)
+const parallaxPoints = [
+  { x: 0, y: 380 },
+  { x: 180, y: 280 },
+  { x: 340, y: 350 },
+  { x: 480, y: 250 },
+  { x: 650, y: 370 },
+  { x: 800, y: 300 }
 ];
 
 const LANDING_PAD_START_X = 360;
@@ -185,6 +233,57 @@ window.addEventListener('keyup', (e) => {
   }
 });
 
+// Particle Class for Vector FX
+class Particle {
+  constructor(x, y, vx, vy, color, size = 2, decay = 0.02, type = 'exhaust') {
+    this.x = x;
+    this.y = y;
+    this.vx = vx;
+    this.vy = vy;
+    this.color = color;
+    this.size = size;
+    this.alpha = 1;
+    this.decay = decay;
+    this.type = type;
+  }
+
+  update() {
+    this.x += this.vx;
+    this.y += this.vy;
+
+    // Custom behaviors
+    if (this.type === 'debris') {
+      this.vy += 0.03; // Debris feels gravity
+    } else if (this.type === 'dust') {
+      this.vx *= 0.98; // Dust experiences high air resistance
+      this.vy *= 0.98;
+    }
+
+    this.alpha -= this.decay;
+  }
+
+  draw() {
+    ctx.save();
+    ctx.globalAlpha = this.alpha;
+    ctx.strokeStyle = this.color;
+    ctx.shadowColor = this.color;
+    ctx.shadowBlur = this.type === 'exhaust' ? 8 : 2;
+    ctx.lineWidth = 1;
+
+    ctx.beginPath();
+    if (this.type === 'debris') {
+      ctx.rect(this.x - this.size/2, this.y - this.size/2, this.size, this.size);
+    } else {
+      ctx.moveTo(this.x - this.size, this.y);
+      ctx.lineTo(this.x + this.size, this.y);
+      ctx.moveTo(this.x, this.y - this.size);
+      ctx.lineTo(this.x, this.y + this.size);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
 function resetGame() {
   lander.x = 100 + Math.random() * 100;
   lander.y = 50;
@@ -196,6 +295,33 @@ function resetGame() {
   lander.rotateRight = false;
   
   fuel = 1000;
+
+  // Reset Cargo (X=650, snapped to terrain y)
+  cargo.x = 650;
+  cargo.y = getTerrainHeight(650) - cargo.height / 2;
+  cargo.vx = 0;
+  cargo.vy = 0;
+  cargo.attached = false;
+  cargo.secured = false;
+
+  // Reset Wind
+  windX = 0;
+  targetWindX = (Math.random() * 2 - 1) * 0.04; // Limit wind force
+  windTimer = 0;
+
+  // Reset Stress
+  stress = 0;
+  crtOverlay.classList.remove('glitch-active');
+
+  // Reset Particles
+  particles = [];
+
+  // Reset Camera
+  camera.x = 0;
+  camera.y = 0;
+  camera.zoom = 1;
+  camera.targetZoom = 1;
+
   updateUI();
 }
 
@@ -221,11 +347,62 @@ function getTerrainHeight(x) {
   return 500; // default fallback
 }
 
+// Spawn exhaust sparks from thruster
+function spawnExhaust() {
+  const angle = lander.angle;
+  // Position sparks at the engine nozzle (bell) bottom
+  const nozzleX = lander.x + 8 * Math.sin(angle);
+  const nozzleY = lander.y + 8 * Math.cos(angle);
+
+  // Direct exhaust vector backwards with spread
+  const spread = 0.4;
+  const speed = 2 + Math.random() * 2;
+  const vx = lander.vx - speed * Math.sin(angle) + (Math.random() * 2 - 1) * spread;
+  const vy = lander.vy + speed * Math.cos(angle) + (Math.random() * 2 - 1) * spread;
+
+  particles.push(new Particle(nozzleX, nozzleY, vx, vy, '#ff007f', 1.5, 0.04, 'exhaust'));
+}
+
+// Spawn ground dust if thruster is close
+function spawnDust(groundY) {
+  const dustX = lander.x + (Math.random() * 20 - 10);
+  const vx = (Math.random() * 3 - 1.5) + lander.vx * 0.5;
+  const vy = -(Math.random() * 1.5 + 0.5); // shoot upwards/sideways
+  particles.push(new Particle(dustX, groundY, vx, vy, '#00ff66', 1.5, 0.03, 'dust'));
+}
+
+// Trigger massive ship explosion
+function triggerExplosion() {
+  for (let i = 0; i < 40; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 1 + Math.random() * 4;
+    const vx = Math.sin(angle) * speed;
+    const vy = Math.cos(angle) * speed - 1; // drift upwards
+    const size = 2 + Math.random() * 4;
+    const decay = 0.01 + Math.random() * 0.01;
+    particles.push(new Particle(lander.x, lander.y, vx, vy, '#ff0055', size, decay, 'debris'));
+  }
+}
+
 // Update game physics and check collisions
 function update() {
-  if (gameState !== 'PLAYING') return;
+  if (gameState !== 'PLAYING') {
+    // If not playing, still update particles and camera slowly
+    particles.forEach(p => p.update());
+    particles = particles.filter(p => p.alpha > 0);
+    return;
+  }
 
-  // 1. Apply Rotation
+  // 1. Update Wind (change target every 300 frames)
+  windTimer++;
+  if (windTimer > 300) {
+    targetWindX = (Math.random() * 2 - 1) * 0.04;
+    windTimer = 0;
+  }
+  windX += (targetWindX - windX) * 0.005; // Smooth wind drift
+  lander.vx += windX;
+
+  // 2. Apply Rotation
   if (lander.rotateLeft) {
     lander.angle -= ROTATION_SPEED;
   }
@@ -233,40 +410,152 @@ function update() {
     lander.angle += ROTATION_SPEED;
   }
 
-  // 2. Apply Thrust
+  // 3. Apply Thrust
   if (lander.thrusting && fuel > 0) {
-    // Thrust vectoring (Angle 0 is straight up, rotating clockwise makes angle positive)
     lander.vx += THRUST * Math.sin(lander.angle);
     lander.vy -= THRUST * Math.cos(lander.angle);
-    fuel -= 2; // Consume fuel
+    fuel -= 2;
     if (fuel < 0) fuel = 0;
+    
     playSound('thrust');
+    spawnExhaust();
   }
 
-  // 3. Apply Gravity
+  // 4. Ground Dust check
+  const terrainHeightAtLander = getTerrainHeight(lander.x);
+  const distToGround = terrainHeightAtLander - (lander.y + 12);
+  if (lander.thrusting && fuel > 0 && distToGround < 40) {
+    spawnDust(terrainHeightAtLander);
+  }
+
+  // 5. Apply Gravity to Lander
   lander.vy += GRAVITY;
 
-  // 4. Update Position
+  // 6. Tether Spring Physics (Lander <-> Cargo)
+  if (cargo.attached && !cargo.secured) {
+    const dx = cargo.x - lander.x;
+    const dy = cargo.y - lander.y;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    
+    if (dist > TETHER_LENGTH) {
+      const stretch = dist - TETHER_LENGTH;
+      const forceX = (dx / dist) * stretch * SPRING_K;
+      const forceY = (dy / dist) * stretch * SPRING_K;
+      
+      // Pull cargo
+      cargo.vx -= forceX;
+      cargo.vy -= forceY;
+      
+      // Pull lander (opposing force modified by mass ratio)
+      lander.vx += forceX * CARGO_MASS;
+      lander.vy += forceY * CARGO_MASS;
+    }
+  }
+
+  // 7. Update Lander Position
   lander.x += lander.vx;
   lander.y += lander.vy;
 
-  // Wrap X position or block borders
-  if (lander.x < 0) {
-    lander.x = 0;
+  // Border constraints for Lander
+  if (lander.x < 10) {
+    lander.x = 10;
     lander.vx = 0;
-  } else if (lander.x > canvas.width) {
-    lander.x = canvas.width;
+  } else if (lander.x > canvas.width - 10) {
+    lander.x = canvas.width - 10;
     lander.vx = 0;
   }
 
-  // 5. Collision Check (Check if bottom of lander hits terrain)
-  const landerBottomY = lander.y + lander.height / 2;
-  const terrainHeightAtLander = getTerrainHeight(lander.x);
+  // 8. Update Cargo position
+  if (cargo.attached) {
+    cargo.vy += CARGO_GRAVITY;
+    cargo.x += cargo.vx;
+    cargo.y += cargo.vy;
 
+    // Cargo terrain collision
+    const cargoBottomY = cargo.y + cargo.height / 2;
+    const cargoTerrainY = getTerrainHeight(cargo.x);
+    if (cargoBottomY >= cargoTerrainY) {
+      cargo.y = cargoTerrainY - cargo.height / 2;
+      cargo.vy = 0;
+      cargo.vx *= 0.6; // friction
+    }
+  } else {
+    // Keep cargo resting on terrain
+    cargo.y = getTerrainHeight(cargo.x) - cargo.height / 2;
+  }
+
+  // 9. Check Cargo Attachment Trigger
+  if (!cargo.attached) {
+    const dx = lander.x - cargo.x;
+    const dy = (lander.y + 12) - cargo.y;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    
+    // Attach if close and speed is relatively low
+    if (dist < 45 && Math.abs(lander.vx) < 1.0 && Math.abs(lander.vy) < 1.0) {
+      cargo.attached = true;
+      cargo.vx = lander.vx;
+      cargo.vy = lander.vy;
+    }
+  }
+
+  // 10. Update Particles
+  particles.forEach(p => p.update());
+  particles = particles.filter(p => p.alpha > 0);
+
+  // 11. Collision Check (Lander hits terrain)
+  const landerBottomY = lander.y + lander.height / 2;
   if (landerBottomY >= terrainHeightAtLander) {
-    // Collision detected! Snap to terrain.
     lander.y = terrainHeightAtLander - lander.height / 2;
     handleCollision();
+  }
+
+  // 12. Camera Viewport calculations
+  if (lander.y > 300) {
+    camera.targetZoom = 1.5; // Zoom in for landing
+  } else if (!cargo.attached && Math.abs(lander.x - cargo.x) < 150) {
+    camera.targetZoom = 1.3; // Zoom in slightly when near cargo
+  } else {
+    camera.targetZoom = 1.0; // Standard view
+  }
+  camera.zoom += (camera.targetZoom - camera.zoom) * 0.03; // Lerp zoom
+
+  const targetCamX = lander.x - (canvas.width / 2) / camera.zoom;
+  const targetCamY = lander.y - (canvas.height * 0.6) / camera.zoom; // Offset camera slightly down
+
+  camera.x += (targetCamX - camera.x) * 0.05;
+  camera.y += (targetCamY - camera.y) * 0.05;
+
+  // Constrain Camera to logical canvas bounds
+  const minCamX = 0;
+  const maxCamX = canvas.width - canvas.width / camera.zoom;
+  const minCamY = 0;
+  const maxCamY = canvas.height - canvas.height / camera.zoom;
+
+  camera.x = Math.max(minCamX, Math.min(camera.x, maxCamX));
+  camera.y = Math.max(minCamY, Math.min(camera.y, maxCamY));
+
+  // 13. Pilot Stress Calculations
+  let targetStress = 0;
+  if (lander.vy > MAX_SAFE_V_SPEED && lander.vy > 0) {
+    targetStress += 35; // high vertical descent
+  }
+  if (Math.abs(lander.vx) > MAX_SAFE_H_SPEED) {
+    targetStress += 20; // high horizontal drift
+  }
+  if (distToGround < 60 && !(lander.x >= LANDING_PAD_START_X && lander.x <= LANDING_PAD_END_X)) {
+    targetStress += 40; // close to mountains
+  }
+  if (fuel === 0) {
+    targetStress += 60; // out of fuel
+  }
+
+  stress += (targetStress - stress) * 0.02; // Lerp stress
+  stress = Math.max(0, Math.min(100, stress));
+
+  if (stress > 60) {
+    crtOverlay.classList.add('glitch-active');
+  } else {
+    crtOverlay.classList.remove('glitch-active');
   }
 
   updateUI();
@@ -282,46 +571,60 @@ function handleCollision() {
   const safeAngle = Math.abs(lander.angle) <= MAX_SAFE_ANGLE;
 
   if (onPad && safeVSpeed && safeHSpeed && safeAngle) {
-    // Safe landing!
-    gameState = 'GAMEOVER';
-    playSound('landing');
-    showGameOver(true);
-    
-    // Score calculation (Remaining fuel + points for landing)
-    const points = 1000 + Math.floor(fuel);
-    score += points;
-    scoreVal.textContent = String(score).padStart(4, '0');
+    if (cargo.attached) {
+      // Safe landing with cargo!
+      gameState = 'GAMEOVER';
+      cargo.secured = true;
+      playSound('landing');
+      showGameOver(true);
+      
+      // Score calculation (Remaining fuel + points for landing)
+      const points = 1500 + Math.floor(fuel); // More points for securing cargo
+      score += points;
+      scoreVal.textContent = String(score).padStart(4, '0');
+    } else {
+      // Landed safely but forgot cargo
+      gameState = 'GAMEOVER';
+      triggerExplosion();
+      playSound('crash');
+      showGameOver(false, true, true, true, true, "MISSION FAILED: CARGO NOT RETRIEVED");
+    }
   } else {
     // Crash!
     gameState = 'GAMEOVER';
+    triggerExplosion();
     playSound('crash');
     showGameOver(false, onPad, safeVSpeed, safeHSpeed, safeAngle);
   }
 }
 
-function showGameOver(success, onPad, safeVSpeed, safeHSpeed, safeAngle) {
+function showGameOver(success, onPad, safeVSpeed, safeHSpeed, safeAngle, customMsg = null) {
   overlayScreen.classList.remove('hidden');
   startScreen.classList.add('hidden');
   gameoverScreen.classList.remove('hidden');
 
   if (success) {
-    gameoverTitle.textContent = "LANDING SUCCESSFUL";
+    gameoverTitle.textContent = "MISSION ACCOMPLISHED";
     gameoverTitle.style.color = "var(--neon-green)";
     gameoverTitle.style.textShadow = "0 0 10px var(--neon-green)";
-    gameoverMsg.textContent = `BONUS POINTS AWARDED! FUEL LEFT: ${fuel}L`;
+    gameoverMsg.textContent = `CARGO SECURED. BONUS POINTS AWARDED! FUEL LEFT: ${fuel}L`;
   } else {
     gameoverTitle.textContent = "CRITICAL FAILURE";
     gameoverTitle.style.color = "var(--neon-pink)";
     gameoverTitle.style.textShadow = "0 0 10px var(--neon-pink)";
 
-    // Detail why they crashed
-    let reason = "CRASHED ON TERRAIN";
-    if (onPad) {
-      if (!safeAngle) reason = "CRASHED: BAD LANDING ANGLE";
-      else if (!safeVSpeed) reason = "CRASHED: IMPACT VELOCITY TOO HIGH";
-      else if (!safeHSpeed) reason = "CRASHED: DRIFTING TOO FAST";
+    if (customMsg) {
+      gameoverMsg.textContent = customMsg;
+    } else {
+      // Detail why they crashed
+      let reason = "CRASHED ON TERRAIN";
+      if (onPad) {
+        if (!safeAngle) reason = "CRASHED: BAD LANDING ANGLE";
+        else if (!safeVSpeed) reason = "CRASHED: IMPACT VELOCITY TOO HIGH";
+        else if (!safeHSpeed) reason = "CRASHED: DRIFTING TOO FAST";
+      }
+      gameoverMsg.textContent = reason;
     }
-    gameoverMsg.textContent = reason;
   }
 }
 
@@ -333,6 +636,37 @@ function updateUI() {
   // Format angle in degrees, negative or positive
   const degrees = Math.round(lander.angle * (180 / Math.PI));
   angleVal.textContent = degrees;
+
+  // 1. Cargo Display
+  if (cargo.secured) {
+    cargoVal.textContent = "SECURED";
+    cargoVal.style.color = "var(--neon-green)";
+  } else if (cargo.attached) {
+    cargoVal.textContent = "ATTACHED";
+    cargoVal.style.color = "var(--neon-cyan)";
+  } else {
+    cargoVal.textContent = "SEARCHING";
+    cargoVal.style.color = "#fff";
+  }
+
+  // 2. Stress Display
+  const roundedStress = Math.round(stress);
+  stressVal.textContent = roundedStress;
+  if (roundedStress > 60) {
+    stressVal.classList.add('stress-high');
+  } else {
+    stressVal.classList.remove('stress-high');
+  }
+
+  // 3. Wind Display
+  // Scale factor to make decimal wind units look like an windspeed in knots/mph (e.g. max ~40 units)
+  const displayWind = Math.abs(windX * 500).toFixed(0);
+  windVal.textContent = displayWind;
+  
+  // Point wind arrow: positive drifts right (pointing right), negative drifts left (pointing left)
+  // Arrow default is left ◀. So rotate 180deg to point right ▶.
+  windDirArrow.style.transform = windX >= 0 ? 'rotate(180deg)' : 'rotate(0deg)';
+  windDirArrow.style.color = Math.abs(windX) > 0.02 ? 'var(--neon-pink)' : '#fff';
 
   // Add flashing red warnings for high speeds when descending
   if (lander.vy > MAX_SAFE_V_SPEED) {
@@ -356,11 +690,31 @@ function updateUI() {
 
 // Drawing Functions
 function draw() {
-  // Clear with a translucent fade to get vector glow trails if we want,
-  // but for clean retro vector lines we just clear the screen.
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // 1. Draw Terrain
+  // Apply Camera Zoom & Panning viewport transformation
+  ctx.save();
+  ctx.scale(camera.zoom, camera.zoom);
+  ctx.translate(-camera.x, -camera.y);
+
+  // 1. Draw Parallax Background Mountains (slower camera tracking)
+  ctx.save();
+  // We translate the background at a fraction of the foreground camera movement
+  ctx.translate(camera.x * 0.7, camera.y * 0.7); 
+  ctx.beginPath();
+  ctx.moveTo(parallaxPoints[0].x, parallaxPoints[0].y);
+  for (let i = 1; i < parallaxPoints.length; i++) {
+    ctx.lineTo(parallaxPoints[i].x, parallaxPoints[i].y);
+  }
+  ctx.strokeStyle = '#002611'; // Dark faint green
+  ctx.lineWidth = 2;
+  ctx.shadowColor = '#002611';
+  ctx.shadowBlur = 4;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.restore();
+
+  // 2. Draw Foreground Terrain
   ctx.beginPath();
   ctx.moveTo(terrainPoints[0].x, terrainPoints[0].y);
   for (let i = 1; i < terrainPoints.length; i++) {
@@ -371,9 +725,9 @@ function draw() {
   ctx.shadowColor = '#00ff66';
   ctx.shadowBlur = 10;
   ctx.stroke();
-  ctx.shadowBlur = 0; // Reset shadow
+  ctx.shadowBlur = 0; // Reset
 
-  // 2. Draw Landing Pad (flashing vector cyan)
+  // 3. Draw Landing Pad (flashing vector cyan)
   ctx.beginPath();
   ctx.moveTo(LANDING_PAD_START_X, LANDING_PAD_Y);
   ctx.lineTo(LANDING_PAD_END_X, LANDING_PAD_Y);
@@ -386,12 +740,52 @@ function draw() {
   ctx.stroke();
   ctx.shadowBlur = 0; // Reset
 
-  // 3. Draw Lander
+  // 4. Draw Tether Cable (Dashed Cyan spring line)
+  if (cargo.attached && !cargo.secured) {
+    ctx.beginPath();
+    ctx.setLineDash([4, 4]);
+    ctx.moveTo(lander.x, lander.y + 12);
+    ctx.lineTo(cargo.x, cargo.y);
+    ctx.strokeStyle = '#00f3ff';
+    ctx.shadowColor = '#00f3ff';
+    ctx.shadowBlur = 8;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.setLineDash([]); // reset dash
+    ctx.shadowBlur = 0;
+  }
+
+  // 5. Draw Cargo Capsule
+  if (!cargo.secured) {
+    ctx.save();
+    ctx.translate(cargo.x, cargo.y);
+    ctx.strokeStyle = cargo.attached ? '#00f3ff' : '#ffffff';
+    ctx.shadowColor = cargo.attached ? '#00f3ff' : '#ffffff';
+    ctx.shadowBlur = cargo.attached ? 10 : 4;
+    ctx.lineWidth = 2;
+
+    // Draw box with X inside
+    ctx.strokeRect(-cargo.width/2, -cargo.height/2, cargo.width, cargo.height);
+    ctx.beginPath();
+    ctx.moveTo(-cargo.width/2, -cargo.height/2);
+    ctx.lineTo(cargo.width/2, cargo.height/2);
+    ctx.moveTo(cargo.width/2, -cargo.height/2);
+    ctx.lineTo(-cargo.width/2, cargo.height/2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // 6. Draw Particles
+  particles.forEach(p => p.draw());
+
+  // 7. Draw Lander
   if (gameState === 'PLAYING') {
     drawLander();
-  } else if (gameState === 'GAMEOVER' && gameoverTitle.textContent === "LANDING SUCCESSFUL") {
+  } else if (gameState === 'GAMEOVER' && (gameoverTitle.textContent === "MISSION ACCOMPLISHED" || cargo.secured)) {
     drawLander(); // Draw it landed
   }
+
+  ctx.restore(); // Restore camera transformation so HUD elements draw correctly in screen space
 }
 
 function drawLander() {
